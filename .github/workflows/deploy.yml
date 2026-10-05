@@ -1,0 +1,64 @@
+name: Cloud Task Manager CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: cloud-task-manager
+  ECR_REGISTRY: 873505479066.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::873505479066:role/GitHubActionsECRRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+
+      - name: Deploy to EC2 via SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --region ${{ env.AWS_REGION }} \
+            --instance-ids i-0fdb980a2889f1a9c \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 873505479066.dkr.ecr.us-east-1.amazonaws.com",
+              "docker pull 873505479066.dkr.ecr.us-east-1.amazonaws.com/cloud-task-manager:latest",
+              "docker stop cloud-task-manager || true",
+              "docker rm cloud-task-manager || true",
+              "docker run -d --name cloud-task-manager -p 5000:5000 873505479066.dkr.ecr.us-east-1.amazonaws.com/cloud-task-manager:latest"
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --region ${{ env.AWS_REGION }} \
+            --command-id "$COMMAND_ID" \
+            --instance-id i-0fdb980a2889f1a9c
